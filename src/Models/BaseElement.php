@@ -374,6 +374,7 @@ class BaseElement extends DataObject
 
             // Viewer groups
             $fields->removeByName('ViewerGroups');
+            $fields->removeByName('EditorGroups');
 
             $viewersOptionsField = OptionsetField::create(
                 "CanViewType",
