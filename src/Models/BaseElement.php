@@ -17,9 +17,12 @@ use SilverStripe\Forms\FieldList;
 use SilverStripe\Forms\HiddenField;
 use SilverStripe\Forms\NumericField;
 use SilverStripe\Forms\TextField;
+use SilverStripe\Forms\ListboxField;
+use SilverStripe\Forms\OptionsetField;
 use SilverStripe\ORM\DataObject;
 use SilverStripe\ORM\FieldType\DBField;
 use SilverStripe\ORM\FieldType\DBHTMLText;
+use SilverStripe\Security\Group;
 use SilverStripe\Security\Member;
 use SilverStripe\Security\Permission;
 use SilverStripe\Versioned\Versioned;
@@ -62,11 +65,16 @@ class BaseElement extends DataObject
         'ShowTitle' => 'Boolean',
         'Sort' => 'Int',
         'ExtraClass' => 'Varchar(255)',
-        'Style' => 'Varchar(255)'
+        'Style' => 'Varchar(255)',
+        'CanViewType' => "Enum('Anyone, LoggedInUsers, OnlyTheseUsers', 'Anyone')"
     ];
 
     private static $has_one = [
         'Parent' => ElementalArea::class
+    ];
+
+    private static $many_many = [
+        'ViewerGroups' => Group::class,
     ];
 
     private static $extensions = [
@@ -149,6 +157,29 @@ class BaseElement extends DataObject
         $extended = $this->extendedCan(__FUNCTION__, $member);
         if ($extended !== null) {
             return $extended;
+        }
+
+        // admin override
+        if ($member && Permission::checkMember($member, array("ADMIN", "SITETREE_VIEW_ALL"))) {
+            return true;
+        }
+
+        // check for empty spec
+        if (!$this->owner->CanViewType || $this->owner->CanViewType == 'Anyone') {
+            return true;
+        }
+
+        // check for any logged-in users
+        if ($this->owner->CanViewType == 'LoggedInUsers' && $member) {
+            return true;
+        }
+
+        // check for specific groups
+        if ($member && is_numeric($member)) {
+            $member = DataObject::get_by_id('Member', $member);
+        }
+        if ($this->owner->CanViewType == 'OnlyTheseUsers' && $member && $member->inGroups($this->owner->ViewerGroups())) {
+            return true;
         }
 
         if ($this->hasMethod('getPage')) {
@@ -302,6 +333,41 @@ class BaseElement extends DataObject
                 $fields->fieldByName('Root.History')
                     ->addExtraClass('elemental-block__history-tab tab--history-viewer');
             }
+
+
+
+
+            // Viewer groups
+            $fields->removeFieldFromTab('Root', 'ViewerGroups');
+            $groupsMap = Group::get()->map('ID', 'Breadcrumbs')->toArray();
+            asort($groupsMap);
+            $viewersOptionsField = OptionsetField::create(
+                'CanViewType',
+                _t(__CLASS__.'.ACCESSHEADER', 'Who can view this page?')
+            );
+            $viewerGroupsField = ListboxField::create('ViewerGroups', _t(__CLASS__.'.VIEWERGROUPS', 'Viewer Groups'))
+                //->setMultiple(true)
+                ->setSource($groupsMap)
+                ->setAttribute(
+                    'data-placeholder',
+                    _t(__CLASS__.'.GroupPlaceholder', 'Click to select group')
+                );
+            $viewersOptionsSource = array();
+            $viewersOptionsSource['Anyone'] = _t(__CLASS__.'.ACCESSANYONE', 'Anyone');
+            $viewersOptionsSource['LoggedInUsers'] = _t(__CLASS__.'.ACCESSLOGGEDIN', 'Logged-in users');
+            $viewersOptionsSource['OnlyTheseUsers'] = _t(__CLASS__.'.ACCESSONLYTHESE', 'Only these people (choose from list)');
+            $viewersOptionsField->setSource($viewersOptionsSource)->setValue('Anyone');
+
+            $fields->addFieldsToTab('Root.ViewerGroups', [
+                $viewersOptionsField,
+                $viewerGroupsField,
+            ]);
+
+
+
+
+
+
         });
 
         return parent::getCMSFields();
