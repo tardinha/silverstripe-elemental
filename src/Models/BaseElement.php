@@ -15,14 +15,18 @@ use SilverStripe\Forms\CheckboxField;
 use SilverStripe\Forms\DropdownField;
 use SilverStripe\Forms\FieldList;
 use SilverStripe\Forms\HiddenField;
-use SilverStripe\Forms\NumericField;
-use SilverStripe\Forms\TextField;
 use SilverStripe\Forms\ListboxField;
+use SilverStripe\Forms\NumericField;
 use SilverStripe\Forms\OptionsetField;
+use SilverStripe\Forms\TextField;
+use SilverStripe\Forms\TreeMultiselectField;
 use SilverStripe\ORM\DataObject;
 use SilverStripe\ORM\FieldType\DBField;
 use SilverStripe\ORM\FieldType\DBHTMLText;
+use SilverStripe\Security\Security;
 use SilverStripe\Security\Group;
+use SilverStripe\Security\InheritedPermissions;
+use SilverStripe\Security\InheritedPermissionsExtension;
 use SilverStripe\Security\Member;
 use SilverStripe\Security\Permission;
 use SilverStripe\Versioned\Versioned;
@@ -65,8 +69,7 @@ class BaseElement extends DataObject
         'ShowTitle' => 'Boolean',
         'Sort' => 'Int',
         'ExtraClass' => 'Varchar(255)',
-        'Style' => 'Varchar(255)',
-        'CanViewType' => "Enum('Anyone, LoggedInUsers, OnlyTheseUsers', 'Anyone')"
+        'Style' => 'Varchar(255)'
     ];
 
     private static $has_one = [
@@ -78,7 +81,8 @@ class BaseElement extends DataObject
     ];
 
     private static $extensions = [
-        Versioned::class
+        Versioned::class,
+        InheritedPermissionsExtension::class
     ];
 
     private static $versioned_gridfield_extensions = true;
@@ -152,34 +156,12 @@ class BaseElement extends DataObject
      * @param Member $member
      * @return boolean
      */
+/*
     public function canView($member = null)
     {
         $extended = $this->extendedCan(__FUNCTION__, $member);
         if ($extended !== null) {
             return $extended;
-        }
-
-        // admin override
-        if ($member && Permission::checkMember($member, array("ADMIN", "SITETREE_VIEW_ALL"))) {
-            return true;
-        }
-
-        // check for empty spec
-        if (!$this->owner->CanViewType || $this->owner->CanViewType == 'Anyone') {
-            return true;
-        }
-
-        // check for any logged-in users
-        if ($this->owner->CanViewType == 'LoggedInUsers' && $member) {
-            return true;
-        }
-
-        // check for specific groups
-        if ($member && is_numeric($member)) {
-            $member = DataObject::get_by_id('Member', $member);
-        }
-        if ($this->owner->CanViewType == 'OnlyTheseUsers' && $member && $member->inGroups($this->owner->ViewerGroups())) {
-            return true;
         }
 
         if ($this->hasMethod('getPage')) {
@@ -189,6 +171,62 @@ class BaseElement extends DataObject
         }
 
         return (Permission::check('CMS_ACCESS', 'any', $member)) ? true : null;
+    }
+*/
+
+    /**
+     * This function should return true if the current user can view this element.
+     *
+     * Denies permission if any of the following conditions is true:
+     * - canView() on any extension returns false
+     * - "CanViewType" directive is set to "LoggedInUsers" and no user is logged in
+     * - "CanViewType" directive is set to "OnlyTheseUsers" and user is not in the given groups
+     *
+     * @uses DataExtension->canView()
+     * @uses ViewerGroups()
+     *
+     * @param Member $member
+     * @return bool True if the current user can view this page
+     */
+    public function canView($member = null)
+    {
+        if (!$member) {
+            $member = Security::getCurrentUser();
+        }
+
+        // Standard mechanism for accepting permission changes from extensions
+        $extended = $this->extendedCan('canView', $member);
+        if ($extended !== null) {
+            return $extended;
+        }
+
+        // admin override
+        if ($member && Permission::checkMember($member, array("ADMIN", "SITETREE_VIEW_ALL"))) {
+            return true;
+        }
+
+        // Note: getInheritedPermissions() is disused in this instance
+        // to allow parent canView extensions to influence canView()
+
+        // check for empty spec
+        if (!$this->CanViewType || $this->CanViewType === InheritedPermissions::ANYONE) {
+            return true;
+        }
+
+        // check for any logged-in users
+        if ($this->CanViewType === InheritedPermissions::LOGGED_IN_USERS && $member && $member->ID) {
+            return true;
+        }
+
+        // check for specific groups
+        if ($this->CanViewType === InheritedPermissions::ONLY_THESE_USERS
+            && $member
+            && $member->inGroups($this->ViewerGroups())
+        ) {
+            return true;
+        }
+
+        return false;
     }
 
     /**
@@ -334,39 +372,35 @@ class BaseElement extends DataObject
                     ->addExtraClass('elemental-block__history-tab tab--history-viewer');
             }
 
-
-
-
             // Viewer groups
-            $fields->removeFieldFromTab('Root', 'ViewerGroups');
-            $groupsMap = Group::get()->map('ID', 'Breadcrumbs')->toArray();
-            asort($groupsMap);
+            $fields->removeByName('ViewerGroups');
+
             $viewersOptionsField = OptionsetField::create(
-                'CanViewType',
-                _t(__CLASS__.'.ACCESSHEADER', 'Who can view this page?')
+                "CanViewType",
+                _t(__CLASS__.'.ACCESSHEADER', "Who can view this page?")
             );
-            $viewerGroupsField = ListboxField::create('ViewerGroups', _t(__CLASS__.'.VIEWERGROUPS', 'Viewer Groups'))
-                //->setMultiple(true)
-                ->setSource($groupsMap)
-                ->setAttribute(
-                    'data-placeholder',
-                    _t(__CLASS__.'.GroupPlaceholder', 'Click to select group')
-                );
-            $viewersOptionsSource = array();
-            $viewersOptionsSource['Anyone'] = _t(__CLASS__.'.ACCESSANYONE', 'Anyone');
-            $viewersOptionsSource['LoggedInUsers'] = _t(__CLASS__.'.ACCESSLOGGEDIN', 'Logged-in users');
-            $viewersOptionsSource['OnlyTheseUsers'] = _t(__CLASS__.'.ACCESSONLYTHESE', 'Only these people (choose from list)');
+
+            $viewerGroupsField = TreeMultiselectField::create(
+                "ViewerGroups",
+                _t(__CLASS__.'.VIEWERGROUPS', "Viewer Groups"),
+                Group::class
+            );
+
+            $viewersOptionsSource = [
+                InheritedPermissions::ANYONE => _t(__CLASS__.'.ACCESSANYONE', "Anyone"),
+                InheritedPermissions::LOGGED_IN_USERS => _t(__CLASS__.'.ACCESSLOGGEDIN', "Logged-in users"),
+                InheritedPermissions::ONLY_THESE_USERS => _t(
+                    __CLASS__.'.ACCESSONLYTHESE',
+                    "Only these groups (choose from list)"
+                ),
+            ];
+
             $viewersOptionsField->setSource($viewersOptionsSource)->setValue('Anyone');
 
             $fields->addFieldsToTab('Root.ViewerGroups', [
                 $viewersOptionsField,
                 $viewerGroupsField,
             ]);
-
-
-
-
-
 
         });
 
